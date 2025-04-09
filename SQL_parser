@@ -1,0 +1,138 @@
+import os
+import re
+import tkinter as tk
+from tkinter import ttk
+from typing import List, Tuple
+
+def extract_sql_statements(input_file: str) -> Tuple[List[str], List[int], int]:
+    sql_statements = []
+    statement_line_numbers = []
+    seen_statements = set()  # To track unique (line_num, sql) pairs
+
+    try:
+        with open(input_file, 'r', encoding='utf-8') as file:
+            content = file.read()
+            total_lines = content.count('\n') + 1
+
+            # Pattern 1: Existing patterns for single-line SQL in method calls
+            patterns = [
+                r'(executeQuery|executeUpdate|prepareStatement)\s*\(\s*"([^"]+)"',
+                r'openrs\s*\(\s*[^,]+,\s*"([^"]+)"',
+                r'getOptions\s*\(\s*[^,]+,\s*"([^"]+)"'
+            ]
+            combined_pattern = '|'.join(patterns)
+            pattern1 = re.compile(combined_pattern, re.IGNORECASE)
+
+            # Pattern 2: Multi-line concatenated SQL statements
+            pattern2 = re.compile(
+                r'sSQL\s*=\s*"([^"]+)"(?:\s*\+\s*"(.*?)"|\s*\+\s*[^"+]+?toSQL[^;]+?)*(?:\s*where\s*[^;]+)?;',
+                re.DOTALL | re.IGNORECASE
+            )
+
+            # Pattern 3: Embedded getOptions with SQL inside out.print or other concatenated strings
+            pattern3 = re.compile(
+                r'getOptions\s*\(\s*[^,]+,\s*"((SELECT|INSERT|UPDATE|DELETE)[^"]+)"',
+                re.IGNORECASE
+            )
+
+            # Find Pattern 1 matches
+            matches1 = pattern1.finditer(content)
+            for match in matches1:
+                for group_idx in [2, 3, 4]:
+                    sql = match.group(group_idx)
+                    if sql and re.match(r'^(SELECT|INSERT|UPDATE|DELETE)', sql.strip(), re.IGNORECASE):
+                        start_pos = match.start()
+                        line_num = content.count('\n', 0, start_pos) + 1
+                        key = (line_num, sql.strip())
+                        if key not in seen_statements:
+                            sql_statements.append(sql.strip())
+                            statement_line_numbers.append(line_num)
+                            seen_statements.add(key)
+                        break
+
+            # Find Pattern 2 matches
+            matches2 = pattern2.finditer(content)
+            for match in matches2:
+                sql_parts = [match.group(1)]
+                full_match = match.group(0)
+                additional_parts = re.findall(r'\+\s*"([^"]+)"', full_match)
+                sql_parts.extend(additional_parts)
+                sql = " ".join(sql_parts).strip()
+                if re.match(r'^(SELECT|INSERT|UPDATE|DELETE)', sql, re.IGNORECASE):
+                    start_pos = match.start()
+                    line_num = content.count('\n', 0, start_pos) + 1
+                    key = (line_num, sql)
+                    if key not in seen_statements:
+                        sql_statements.append(sql)
+                        statement_line_numbers.append(line_num)
+                        seen_statements.add(key)
+
+            # Find Pattern 3 matches (embedded in out.print, etc.)
+            matches3 = pattern3.finditer(content)
+            for match in matches3:
+                sql = match.group(1).strip()
+                if sql and re.match(r'^(SELECT|INSERT|UPDATE|DELETE)', sql, re.IGNORECASE):
+                    start_pos = match.start()
+                    line_num = content.count('\n', 0, start_pos) + 1
+                    key = (line_num, sql)
+                    if key not in seen_statements:
+                        sql_statements.append(sql)
+                        statement_line_numbers.append(line_num)
+                        seen_statements.add(key)
+
+            # Sort SQL statements by line number
+            combined = sorted(zip(statement_line_numbers, sql_statements))
+            statement_line_numbers, sql_statements = zip(*combined) if combined else ([], [])
+
+            return list(sql_statements), list(statement_line_numbers), total_lines
+
+    except FileNotFoundError:
+        print("\u274c Error: File not found.")
+        return [], [], 0
+
+def read_jsp_file(directory: str, file_name: str):
+    file_path = os.path.join(directory, file_name)
+
+    if os.path.exists(file_path) and file_name.endswith('.jsp'):
+        sqls, lines, total = extract_sql_statements(file_path)
+
+        print(f"\n\U0001F4C4 File: {file_name}")
+        print(f"\U0001F4CF Total Lines: {total}")
+        print(f"\U0001F50D SQL Statements Found: {len(sqls)}\n{'-'*50}")
+
+        for idx, (sql, line_num) in enumerate(zip(sqls, lines), start=1):
+            print(f"{idx}. (Line {line_num}) {sql.strip()}")
+
+        print("-" * 50)
+    else:
+        print(f"\u274c File {file_name} does not exist in {directory} or is not a .jsp file.")
+
+def launch_gui():
+    directory = r"C:\\Users\\sogim\\Dependency_project"
+    jsp_files = [
+        "ProjectMaint.jsp", "LedgerRecord.jsp", "EventNew.jsp", "EmpsRecord.jsp", "EmployeeMaint.jsp",
+        "EditorialsRecord.jsp", "EditOfficer.jsp", "EditMembers.jsp", "DepsRecord.jsp", "BugRecord.jsp", "BookMaint.jsp"
+    ]
+
+    def on_submit():
+        selected_file = combo.get()
+        if selected_file:
+            read_jsp_file(directory, selected_file)
+
+    root = tk.Tk()
+    root.title("JSP SQL Extractor")
+
+    label = tk.Label(root, text="Select JSP File:")
+    label.pack(pady=5)
+
+    combo = ttk.Combobox(root, values=jsp_files, width=40)
+    combo.pack(pady=5)
+    combo.set(jsp_files[0])
+
+    button = tk.Button(root, text="Extract SQL", command=on_submit)
+    button.pack(pady=10)
+
+    root.mainloop()
+
+# Launch GUI
+launch_gui()
