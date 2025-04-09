@@ -1,0 +1,301 @@
+import re
+from typing import Dict, List, Tuple, Union
+
+class PolyhedralDatabase:
+    def __init__(self, table: List[Dict[str, Union[int, float]]]):
+        self.table = table
+        self.polyhedron = self._table_to_polyhedron()
+
+    def _table_to_polyhedron(self) -> Dict[str, Tuple[Union[int, float], Union[int, float]]]:
+        """Convert table to polyhedron (min/max bounds for each column)."""
+        if not self.table:
+            return {}
+        
+        columns = self.table[0].keys()
+        polyhedron = {}
+        
+        for col in columns:
+            values = [row[col] for row in self.table]
+            min_val, max_val = min(values), max(values)
+            polyhedron[col] = (min_val, max_val)
+        
+        return polyhedron
+
+    def _to_inequalities(self, condition: str = None) -> List[str]:
+        """Convert polyhedron to uniform inequalities."""
+        inequalities = []
+        for col, (min_val, max_val) in self.polyhedron.items():
+            inequalities.append(f"{col} <= {max_val}")
+            inequalities.append(f"-{col} <= -{min_val}")
+        
+        if condition:
+            rewritten = self._rewrite_condition(condition)
+            inequalities.append(rewritten)
+        return inequalities
+
+    def _rewrite_condition(self, condition: str) -> str:
+        """Ensure condition uses uniform inequalities (all <= or -var <= -val)."""
+        condition = ' '.join(condition.split())  # Normalize spacing
+        
+        if ">=" in condition:
+            lhs, rhs = condition.split(">=", 1)
+            lhs, rhs = lhs.strip(), rhs.strip()
+            if any(op in lhs for op in '+-*/'):
+                return f"-({lhs}) <= -{rhs}"
+            return f"-{lhs} <= -{rhs}"
+        elif ">" in condition:
+            lhs, rhs = condition.split(">", 1)
+            lhs, rhs = lhs.strip(), rhs.strip()
+            if any(op in lhs for op in '+-*/'):
+                return f"-({lhs}) <= -{float(rhs)+1}"
+            return f"-{lhs} <= -{float(rhs)+1}"
+        elif "<=" in condition:
+            return condition
+        elif "<" in condition:
+            lhs, rhs = condition.split("<", 1)
+            lhs, rhs = lhs.strip(), rhs.strip()
+            if any(op in lhs for op in '+-*/'):
+                return f"{lhs} <= {float(rhs)-1}"
+            return f"{lhs} <= {float(rhs)-1}"
+        else:
+            raise ValueError(f"Unsupported condition: {condition}")
+
+    def _negate_condition(self, condition: str) -> str:
+        """Negate a condition that's already in our standard form."""
+        if condition.startswith('-(') and '<=' in condition:
+            # Complex negative condition: -(expr) <= -val → expr >= val → expr > val-1
+            expr_part, val_part = condition.split('<=')
+            expr = expr_part[2:-1].strip()  # Remove '-(' and ')'
+            val = float(val_part.strip().lstrip('-'))
+            return f"{expr} <= {val-1}"
+        elif condition.startswith('-') and '<=' in condition:
+            # Simple negative condition: -var <= -val → var >= val → var > val-1
+            var_part, val_part = condition.split('<=')
+            var = var_part[1:].strip()  # Remove '-'
+            val = float(val_part.strip().lstrip('-'))
+            return f"{var} <= {val-1}"
+        elif '<=' in condition:
+            # Positive condition: expr <= val → expr > val → expr >= val+1
+            lhs, rhs = condition.split('<=')
+            lhs, rhs = lhs.strip(), rhs.strip()
+            if any(op in lhs for op in '+-*/'):
+                return f"-({lhs}) <= -{float(rhs)+1}"
+            return f"-{lhs} <= -{float(rhs)+1}"
+        else:
+            raise ValueError(f"Cannot negate condition: {condition}")
+
+    def _identify_query_type(self, query: str) -> str:
+        """Identify the type of SQL query."""
+        query = query.strip().upper()
+        if query.startswith("UPDATE"):
+            return "UPDATE"
+        elif query.startswith("INSERT"):
+            return "INSERT"
+        elif query.startswith("DELETE"):
+            return "DELETE"
+        elif query.startswith("SELECT"):
+            return "SELECT"
+        else:
+            raise ValueError(f"Unsupported query: {query}")
+
+    def _parse_value(self, val: str) -> Union[int, float]:
+        """Parse a string value to int or float."""
+        try:
+            return int(val)
+        except ValueError:
+            return float(val)
+
+    def _get_attribute_bounds(self, inequalities: List[str]) -> Dict[str, Tuple[float, float]]:
+        """Extract bounds for each attribute from inequalities."""
+        bounds = {}
+        for constraint in inequalities:
+            try:
+                var, op, val = constraint.split()
+                val = self._parse_value(val)
+                
+                if var.startswith('-'):
+                    var = var[1:]
+                    if var in bounds:
+                        current_min, current_max = bounds[var]
+                        bounds[var] = (max(current_min, val), current_max)
+                    else:
+                        bounds[var] = (val, float('inf'))
+                else:
+                    if var in bounds:
+                        current_min, current_max = bounds[var]
+                        bounds[var] = (current_min, min(current_max, val))
+                    else:
+                        bounds[var] = (float('-inf'), val)
+            except ValueError:
+                continue
+        return bounds
+
+    def _create_final_inequalities(self, mp_bounds: Dict[str, Tuple[float, float]], 
+                                 fp_bounds: Dict[str, Tuple[float, float]]) -> List[str]:
+        """Create final inequalities by comparing MP and FP bounds."""
+        final_inequalities = []
+        all_attributes = set(mp_bounds.keys()).union(set(fp_bounds.keys()))
+        
+        for attr in all_attributes:
+            mp_min, mp_max = mp_bounds.get(attr, (float('-inf'), float('inf')))
+            fp_min, fp_max = fp_bounds.get(attr, (float('-inf'), float('inf')))
+            
+            final_max = min(mp_max, fp_max)
+            if final_max != float('inf'):
+                final_inequalities.append(f"{attr} <= {final_max}")
+            
+            final_min = max(mp_min, fp_min)
+            if final_min != float('-inf'):
+                final_inequalities.append(f"-{attr} <= {final_min}")
+        
+        return final_inequalities
+
+    def process_query(self, query: str) -> Dict[str, List[str]]:
+        """Process SQL query and return TP, FP, MP, and final polyhedron."""
+        query_type = self._identify_query_type(query)
+        
+        if query_type == "UPDATE":
+            return self._process_update(query)
+        elif query_type == "INSERT":
+            return self._process_insert(query)
+        elif query_type == "DELETE":
+            return self._process_delete(query)
+        elif query_type == "SELECT":
+            return self._process_select(query)
+        else:
+            raise ValueError(f"Unknown query type: {query}")
+
+    def _process_update(self, query: str) -> Dict[str, List[str]]:
+        """Process UPDATE query."""
+        set_clause = re.search(r"SET\s+(.+?)\s+WHERE", query, re.IGNORECASE).group(1)
+        condition = re.search(r"WHERE\s+(.+)", query, re.IGNORECASE).group(1)
+        condition = self._rewrite_condition(condition)
+
+        # Step 1: Split into TP and FP
+        tp_inequalities = self._to_inequalities() + [condition]
+        fp_inequalities = self._to_inequalities() + [self._negate_condition(condition)]
+
+        # Step 2: Modify TP (MP = TP with updated attributes + condition)
+        mp_inequalities = []
+        for col, (min_val, max_val) in self.polyhedron.items():
+            if col in set_clause:
+                expr = re.search(rf"{col}\s*=\s*(.+)", set_clause).group(1)
+                new_min = eval(expr.replace(col, str(min_val)))
+                new_max = eval(expr.replace(col, str(max_val)))
+                mp_inequalities.append(f"{col} <= {new_max}")
+                mp_inequalities.append(f"-{col} <= -{new_min}")
+            else:
+                mp_inequalities.append(f"{col} <= {max_val}")
+                mp_inequalities.append(f"-{col} <= -{min_val}")
+        mp_inequalities.append(condition)
+
+        # Step 3: Get bounds and create final inequalities
+        mp_bounds = self._get_attribute_bounds(mp_inequalities)
+        fp_bounds = self._get_attribute_bounds(fp_inequalities)
+        final_inequalities = self._create_final_inequalities(mp_bounds, fp_bounds)
+
+        return {
+            "TP": tp_inequalities,
+            "FP": fp_inequalities,
+            "MP": mp_inequalities,
+            "Final": final_inequalities
+        }
+
+    def _process_insert(self, query: str) -> Dict[str, List[str]]:
+        """Process INSERT query."""
+        values = re.search(r"VALUES\s*\((.+)\)", query, re.IGNORECASE).group(1)
+        new_tuple = {col: self._parse_value(val) for col, val in zip(self.polyhedron.keys(), values.split(","))}
+        
+        mp_inequalities = []
+        for col, val in new_tuple.items():
+            mp_inequalities.append(f"{col} <= {val}")
+            mp_inequalities.append(f"-{col} <= -{val}")
+        
+        fp_inequalities = self._to_inequalities()
+        
+        mp_bounds = self._get_attribute_bounds(mp_inequalities)
+        fp_bounds = self._get_attribute_bounds(fp_inequalities)
+        final_inequalities = self._create_final_inequalities(mp_bounds, fp_bounds)
+
+        return {
+            "TP": [],
+            "FP": fp_inequalities,
+            "MP": mp_inequalities,
+            "Final": final_inequalities
+        }
+
+    def _process_delete(self, query: str) -> Dict[str, List[str]]:
+        """Process DELETE query."""
+        condition = re.search(r"WHERE\s+(.+)", query, re.IGNORECASE).group(1)
+        condition = self._rewrite_condition(condition)
+        
+        tp_inequalities = self._to_inequalities() + [condition]
+        fp_inequalities = self._to_inequalities() + [self._negate_condition(condition)]
+        
+        fp_bounds = self._get_attribute_bounds(fp_inequalities)
+        final_inequalities = []
+        for attr, (min_val, max_val) in fp_bounds.items():
+            if max_val != float('inf'):
+                final_inequalities.append(f"{attr} <= {max_val}")
+            if min_val != float('-inf'):
+                final_inequalities.append(f"-{attr} <= {min_val}")
+
+        return {
+            "TP": tp_inequalities,
+            "FP": fp_inequalities,
+            "MP": [],
+            "Final": final_inequalities
+        }
+
+    def _process_select(self, query: str) -> Dict[str, List[str]]:
+        """Process SELECT query."""
+        condition = re.search(r"WHERE\s+(.+)", query, re.IGNORECASE).group(1)
+        condition = self._rewrite_condition(condition)
+        
+        tp_inequalities = self._to_inequalities() + [condition]
+        
+        tp_bounds = self._get_attribute_bounds(tp_inequalities)
+        final_inequalities = []
+        for attr, (min_val, max_val) in tp_bounds.items():
+            if max_val != float('inf'):
+                final_inequalities.append(f"{attr} <= {max_val}")
+            if min_val != float('-inf'):
+                final_inequalities.append(f"-{attr} <= {min_val}")
+
+        return {
+            "TP": tp_inequalities,
+            "FP": [],
+            "MP": [],
+            "Final": final_inequalities
+        }
+
+    def __repr__(self) -> str:
+        return "\n".join(self._to_inequalities())
+
+if __name__ == "__main__":
+    concrete_table = [
+        {"cid": 1, "sal": 1500, "age": 35, "dno": 10},
+        {"cid": 2, "sal": 800, "age": 28, "dno": 20},
+        {"cid": 3, "sal": 2500, "age": 50, "dno": 10},
+        {"cid": 4, "sal": 3000, "age": 62, "dno": 10}
+    ]
+
+    db = PolyhedralDatabase(concrete_table)
+    print("Initial Polyhedron:")
+    print(db)
+
+    queries = [
+        "UPDATE t SET sal = sal * 1.2 WHERE dno + age >= 60",
+        "INSERT INTO t (cid, sal, age, dno) VALUES (5, 2700, 52, 20)",
+        "DELETE FROM t WHERE age >= 61",
+        "SELECT age FROM t WHERE age + dno <= 60"
+    ]
+
+    for query in queries:
+        print(f"\nProcessing Query: {query}")
+        result = db.process_query(query)
+        print("TP:", result["TP"])
+        print("FP:", result["FP"])
+        print("MP:", result["MP"])
+        print("Final:", result["Final"])
+
