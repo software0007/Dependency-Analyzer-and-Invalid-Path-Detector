@@ -1,0 +1,180 @@
+import pandas as pd
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+
+class IntervalDatabase:
+    def __init__(self, concrete_table):
+        self.concrete_table = concrete_table
+        self.operations = []
+        self.defined_attributes = {}
+
+    def create_abstract_table(self, table):
+        abstract_table = {}
+        for col in table.columns:
+            abstract_table[col] = [table[col].min(), table[col].max()] if not table.empty else []
+        return pd.DataFrame([abstract_table]) if not table.empty else pd.DataFrame(columns=table.columns)
+
+    def separate_true_false_parts(self, condition):
+        true_part = self.concrete_table[condition]
+        false_part = self.concrete_table[~condition]
+        return true_part, false_part, self.create_abstract_table(true_part), self.create_abstract_table(false_part)
+
+    def update(self, condition, column, value):
+        true_part, false_part, abstract_true, abstract_false = self.separate_true_false_parts(condition)
+        true_part = true_part.copy()
+        true_part[column] += value
+        modified_part = true_part
+        abstract_modified = self.create_abstract_table(modified_part)
+        final_table = pd.concat([false_part, modified_part]).sort_values(by='eid').reset_index(drop=True)
+        self.concrete_table = final_table
+
+        stmt_name = "s" + str(len(self.operations) + 1)
+        self.operations.append(stmt_name)
+        self.defined_attributes[stmt_name] = column
+        return final_table
+
+    def insert(self, new_row):
+        modified_part = pd.concat([self.concrete_table, pd.DataFrame([new_row])]).sort_values(by='eid').reset_index(drop=True)
+        self.concrete_table = modified_part
+
+        stmt_name = "s" + str(len(self.operations) + 1)
+        self.operations.append(stmt_name)
+        self.defined_attributes[stmt_name] = list(new_row.keys())[1]
+        return modified_part
+
+    def delete(self, condition):
+        true_part, false_part, _, _ = self.separate_true_false_parts(condition)
+        final_table = false_part.sort_values(by='eid').reset_index(drop=True)
+        self.concrete_table = final_table
+
+        stmt_name = "s" + str(len(self.operations) + 1)
+        self.operations.append(stmt_name)
+        self.defined_attributes[stmt_name] = None
+        return final_table
+
+    def select(self, condition):
+        true_part, _, abstract_true, _ = self.separate_true_false_parts(condition)
+
+        stmt_name = "s" + str(len(self.operations) + 1)
+        self.operations.append(stmt_name)
+        self.defined_attributes[stmt_name] = None
+        return abstract_true
+
+    def compute_dependency_matrix(self):
+        n = len(self.operations)
+        dependency = np.zeros((n, n), dtype=int)
+
+        for i in range(n - 1):
+            dependency[i + 1, i] = 1
+
+        return dependency
+
+# Initialize database
+data = {'eid': [1, 2, 3, 4], 'sal': [1500, 800, 2500, 3000], 'age': [35, 28, 50, 62], 'dno': [10, 20, 10, 10]}
+concrete_table = pd.DataFrame(data)
+db = IntervalDatabase(concrete_table)
+
+# SQL Statements
+statements = [
+    (lambda: db.update(db.concrete_table['sal'] >= 1500, 'sal', 100)),   # s1
+    (lambda: db.insert({'eid': 5, 'sal': 2700, 'age': 52, 'dno': 20})),  # s2
+    (lambda: db.delete(db.concrete_table['age'] >= 61)),                 # s3
+    (lambda: db.select(db.concrete_table['age'] <= 50))                  # s4
+]
+
+# Execute statements dynamically
+for stmt_func in statements:
+    stmt_func()
+
+# Compute Dependencies
+final_dep = db.compute_dependency_matrix()
+
+# Take user input for attribute privacy
+attribute_privacy = {}
+print("\nEnter whether each attribute is Private (T) or Public (F):")
+for attr in concrete_table.columns:
+    attribute_privacy[attr] = input(f"{attr} (T/F): ").strip().upper() == 'T'
+
+# Create a directed graph
+G = nx.DiGraph()
+stmt_labels = db.operations
+
+# Add nodes (statements)
+G.add_nodes_from(stmt_labels)
+
+# Add edges based on the final dependency matrix
+for i in range(len(stmt_labels)):
+    for j in range(len(stmt_labels)):
+        if final_dep[j, i] == 1:
+            G.add_edge(stmt_labels[i], stmt_labels[j])
+
+# Find all paths from s1 to s4
+def find_all_paths(G, start, end, path=[]):
+    path = path + [start]
+    if start == end:
+        return [path]
+    paths = []
+    for node in G.successors(start):
+        if node not in path:
+            new_paths = find_all_paths(G, node, end, path)
+            for new_path in new_paths:
+                paths.append(new_path)
+    return paths
+
+# Validate Paths
+valid_paths, invalid_paths = [], []
+
+start, end = "s1", "s4"
+paths = find_all_paths(G, start, end)
+
+for path in paths:
+    flow_valid = True
+    for k in range(len(path) - 1):
+        stmt1, stmt2 = path[k], path[k + 1]
+        var1, var2 = db.defined_attributes[stmt1], db.defined_attributes[stmt2]
+
+        if var1 and var2:
+            attr1_privacy = attribute_privacy.get(var1, None)
+            attr2_privacy = attribute_privacy.get(var2, None)
+
+            if attr1_privacy is not None and attr2_privacy is not None:
+                if attr1_privacy != attr2_privacy:
+                    flow_valid = False
+                    break
+
+    if flow_valid:
+        valid_paths.append(path)
+    else:
+        invalid_paths.append(path)
+
+# Print Paths
+print("\nPaths from s1 to s4:")
+if valid_paths:
+    print("\n✅ Valid Paths:")
+    for path in valid_paths:
+        print(" -> ".join(path))
+else:
+    print("\n❌ No Valid Paths Found.")
+
+if invalid_paths:
+    print("\n🚫 Invalid Paths:")
+    for path in invalid_paths:
+        print(" -> ".join(path))
+else:
+    print("\n✅ No Invalid Paths Found.")
+
+# Create a new graph with only valid paths
+G_valid = nx.DiGraph()
+G_valid.add_nodes_from(stmt_labels)
+
+for path in valid_paths:
+    for i in range(len(path) - 1):
+        G_valid.add_edge(path[i], path[i + 1])
+
+# Plot the Valid Paths Graph
+plt.figure(figsize=(8, 6))
+pos = nx.spring_layout(G_valid, seed=42)
+nx.draw(G_valid, pos, with_labels=True, node_color='lightgreen', edge_color='black', node_size=3000, font_size=12, arrows=True)
+plt.title("Valid Dependency Graph (s1 to s4)")
+plt.show()
