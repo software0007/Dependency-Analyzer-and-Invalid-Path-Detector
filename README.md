@@ -1,6 +1,5 @@
 # Dependency-Analyzer-and-Invalid-Path-Detector
-Dependency Analyzer and Invalid Path Detector
-SemDDA is a Python-based tool that analyzes SQL dependencies in .jsp files and identifies invalid data flow paths. It features both syntax and semantic analysis using different abstract domains and includes a GUI built using Tkinter.
+Dependency Analyzer and Invalid Path Detector is a Python-based tool that analyzes SQL dependencies in .jsp files and identifies invalid data flow paths. It features both syntax and semantic analysis using different abstract domains and includes a GUI built using Tkinter.
 
 🚀 Features
 Parses .jsp files and identifies SQL statements.
@@ -62,6 +61,7 @@ Displays number of SQL statements, dependencies, paths, and analysis time.
 
 
 4. Semantic Option Selected
+   
 ![Screenshot 2025-04-09 184351](https://github.com/user-attachments/assets/584b8664-c0f5-4800-86f5-fe57b63dc1fb)
 
 
@@ -76,6 +76,7 @@ Displays number of SQL statements, dependencies, paths, and analysis time.
 6. Polyhedra-Based Analysis Output
 
 Includes direct/indirect dependencies, false dependencies, and path info.
+
 ![Screenshot 2025-04-09 190106](https://github.com/user-attachments/assets/83a7bb3e-ce3e-4464-ac54-366904d243b0)
 
 
@@ -83,6 +84,7 @@ Includes direct/indirect dependencies, false dependencies, and path info.
 7. Interval Domain Output
 
 Displays results for interval-based analysis.
+
 ![Screenshot 2025-04-09 190234](https://github.com/user-attachments/assets/449cd2d3-0554-4d17-8f99-34a3f3d82537)
 ![Screenshot 2025-04-09 190242](https://github.com/user-attachments/assets/d3a85ca5-001a-41a9-87f0-d6d45bcaf77f)
 
