@@ -1,0 +1,237 @@
+import re
+import numpy as np
+from collections import defaultdict, deque
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# ================== SQL DEPENDENCY ANALYSIS (First Code) ==================
+
+def extract_defined_variables(statement):
+    """Extract columns defined in the SQL statement"""
+    defined_cols = set()
+    
+    if statement.strip().upper().startswith("CREATE TABLE"):
+        columns = re.findall(r"\(\s*(\w+)\s+[\w\(\)]+", statement)
+        defined_cols.update(columns)
+    
+    elif statement.strip().upper().startswith("INSERT INTO"):
+        columns_match = re.search(r"INSERT\s+INTO\s+\w+\s*\((.*?)\)", statement, re.IGNORECASE)
+        if columns_match:
+            columns = [col.strip() for col in columns_match.group(1).split(",")]
+            defined_cols.update(columns)
+    
+    elif statement.strip().upper().startswith("UPDATE"):
+        set_match = re.search(r"SET\s+(.*?)(?=\sWHERE|\s*;|$)", statement, re.IGNORECASE)
+        if set_match:
+            assignments = [assgn.split("=")[0].strip() for assgn in set_match.group(1).split(",")]
+            defined_cols.update(assignments)
+    
+    return defined_cols
+
+def extract_used_variables(statement):
+    """Extract columns used in the SQL statement"""
+    statement = re.sub(r"'.*?'", "", statement)
+    used_cols = set()
+    
+    if statement.strip().upper().startswith("SELECT"):
+        select_match = re.search(r"SELECT\s+(.*?)\s+FROM", statement, re.IGNORECASE)
+        if select_match:
+            items = [item.strip().split()[-1] for item in select_match.group(1).split(",")]
+            used_cols.update(item for item in items if re.match(r"^[A-Za-z_]\w*$", item))
+    
+    if statement.strip().upper().startswith("UPDATE"):
+        set_match = re.search(r"SET\s+(.*?)(?=\sWHERE|\s*;|$)", statement, re.IGNORECASE)
+        if set_match:
+            assignments = set_match.group(1).split(",")
+            for assign in assignments:
+                rhs = assign.split("=", 1)[1].strip() if "=" in assign else ""
+                cols = re.findall(r"\b([A-Za-z_]\w*)\b", rhs)
+                used_cols.update(cols)
+    
+    where_match = re.search(r"WHERE\s+(.*?)(?=\sGROUP BY|\sORDER BY|\sHAVING|\sLIMIT|\sOFFSET|;|$)", statement, re.IGNORECASE)
+    if where_match:
+        where_clause = where_match.group(1)
+        cols = re.findall(r"\b([A-Za-z_]\w*)\b(?=\s*[=<>]|\s+IS\s)", where_clause)
+        used_cols.update(cols)
+    
+    return used_cols
+
+def analyze_sql_dependencies(sql_statements):
+    """Generate dependency matrix and attribute mappings"""
+    n = len(sql_statements)
+    M_dir = np.zeros((n, n), dtype=int)
+    M_ind = np.zeros((n, n), dtype=int)
+    M_total = np.zeros((n, n), dtype=int)
+    
+    edge_attributes = defaultdict(set)
+    dependency_details = [[set() for _ in range(n)] for _ in range(n)]
+    V_def = {}
+
+    for i in range(n):
+        D_i = extract_defined_variables(sql_statements[i])
+        U_i = extract_used_variables(sql_statements[i])
+
+        for j in range(i + 1, n):
+            U_j = extract_used_variables(sql_statements[j])
+            common_cols = {col for col in D_i if col in U_j}
+            if common_cols:
+                M_dir[j][i] = 1
+                edge_attributes[(i + 1, j + 1)].update(common_cols)
+                dependency_details[j][i].update(common_cols)
+
+        for col in D_i:
+            V_def[col] = i + 1  # 1-based indexing
+
+    for j in range(n):
+        for i in range(j):
+            if M_dir[j][i] == 1:
+                causing_cols = dependency_details[j][i]
+                U_i = extract_used_variables(sql_statements[i])
+
+                for col in causing_cols:
+                    for dep_col in U_i:
+                        for k in range(i - 1, -1, -1):
+                            D_k = extract_defined_variables(sql_statements[k])
+                            if dep_col in D_k:
+                                M_ind[j][k] = 1
+                                dependency_details[j][k].add(dep_col)
+                                break
+
+    # Combine direct and indirect dependencies
+    M_total = M_dir + M_ind
+
+    return M_total, edge_attributes, V_def
+
+
+# ================== GRAPH ANALYSIS (Second Code) ==================
+
+def build_graph(matrix):
+    """Build graph from dependency matrix"""
+    n = len(matrix)
+    graph = defaultdict(list)
+    for i in range(n):
+        for j in range(n):
+            if matrix[i][j] in (1,2):
+                graph[j+1].append(i+1)  # 1-based indexing
+    return graph
+
+def draw_graph(graph, edge_attributes):
+    """Visualize graph with edge labels"""
+    G = nx.DiGraph()
+    for src in graph:
+        for dest in graph[src]:
+            G.add_edge(src, dest, label=", ".join(edge_attributes.get((src, dest), [])))
+    
+    pos = nx.spring_layout(G)
+    plt.figure(figsize=(10, 8))
+    nx.draw(G, pos, with_labels=True, node_color="lightblue", 
+            node_size=1500, font_size=12, arrows=True)
+    
+    edge_labels = nx.get_edge_attributes(G, 'label')
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels)
+    plt.title("SQL Dependency Graph")
+    plt.show()
+
+def find_all_paths(graph, start, end):
+    """Find all paths using BFS"""
+    queue = deque([(start, [start])])
+    all_paths = []
+    while queue:
+        current, path = queue.popleft()
+        if current == end:
+            all_paths.append(path)
+        else:
+            for neighbor in graph.get(current, []):
+                if neighbor not in path:
+                    queue.append((neighbor, path + [neighbor]))
+    return all_paths
+
+def assign_truth_values(attributes):
+    """Get truth values for all attributes"""
+    print("\nAssign privacy status to attributes (True=private, False=public):")
+    truth_values = {}
+    for attr in sorted(attributes):
+        while True:
+            val = input(f"{attr} (T/F): ").strip().lower()
+            if val in ['t', 'f']:
+                truth_values[attr] = val == 't'
+                break
+            print("Invalid input. Please enter T or F.")
+    return truth_values
+
+def classify_paths(paths, edge_attributes, truth_values):
+    """Classify paths as valid/invalid based on truth values"""
+    valid, invalid = [], []
+    
+    for path in paths:
+        consistent = True
+        prev_truth = None
+        
+        for i in range(len(path) - 1):
+            edge = (path[i], path[i+1])
+            attrs = edge_attributes.get(edge, set())
+            
+            for attr in attrs:
+                if attr in truth_values:
+                    current_truth = truth_values[attr]
+                    if prev_truth is not None and current_truth != prev_truth:
+                        consistent = False
+                        break
+                    prev_truth = current_truth
+            
+            if not consistent:
+                break
+        
+        if consistent:
+            valid.append(path)
+        else:
+            invalid.append(path)
+    
+    return valid, invalid
+
+# ================== MAIN EXECUTION ==================
+
+def main():
+    # Sample SQL statements
+    sql_statements = [
+        "INSERT INTO products (id, name, price) VALUES (1, 'Laptop', 999.99);",
+        "UPDATE products SET price = price * 0.9 WHERE name = 'Laptop';",
+        "SELECT name FROM products WHERE price < 1000;",
+        "DELETE FROM products WHERE price < 500;"
+    ]
+    
+    # Step 1: Analyze SQL dependencies
+    dependency_matrix, edge_attributes, var_definitions = analyze_sql_dependencies(sql_statements)
+    print("Dependency Matrix:")
+    print(dependency_matrix)
+    
+    # Step 2: Build and visualize graph
+    graph = build_graph(dependency_matrix)
+    draw_graph(graph, edge_attributes)
+    
+    # Step 3: Find all paths
+    source, target = 1, len(sql_statements)
+    paths = find_all_paths(graph, source, target)
+    print(f"\nAll paths from S{source} to S{target}:")
+    for i, path in enumerate(paths, 1):
+        print(f"{i}. {' -> '.join(f'S{n}' for n in path)}")
+    
+    # Step 4: Get truth values for all attributes found
+    all_attributes = set()
+    for attrs in edge_attributes.values():
+        all_attributes.update(attrs)
+    truth_values = assign_truth_values(all_attributes)
+    
+    # Step 5: Classify paths
+    valid_paths, invalid_paths = classify_paths(paths, edge_attributes, truth_values)
+    
+    print("\n✅ Valid Paths:")
+    for i, path in enumerate(valid_paths, 1):
+        print(f"{i}. {' -> '.join(f'S{n}' for n in path)}")
+    
+    print("\n❌ Invalid Paths:")
+    for i, path in enumerate(invalid_paths, 1):
+        print(f"{i}. {' -> '.join(f'S{n}' for n in path)}")
+
+if __name__ == "__main__":
+    main()
